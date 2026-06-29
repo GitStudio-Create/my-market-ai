@@ -103,10 +103,33 @@ async function requestApiProxy(endpoint, params = {}) {
     if (value !== undefined && value !== null && value !== '') url.searchParams.set(key, String(value));
   });
   const response = await fetch(url.toString(), { headers: { Accept: 'application/json' }, credentials: 'omit' });
-  if (!response.ok) throw new Error(`API proxy HTTP ${response.status}`);
-  const payload = await response.json();
-  if (payload?.error || payload?.status === 'error') throw new Error(payload.message || payload.error?.message || String(payload.error || 'API proxy error'));
+  let payload;
+  try {
+    payload = await response.json();
+  } catch {
+    const error = new Error(`中継APIから不正な応答がありました（HTTP ${response.status}）。`);
+    error.status = response.status;
+    throw error;
+  }
+  if (!response.ok || payload?.error || payload?.status === 'error') {
+    const errorPayload = payload?.error || payload;
+    const error = new Error(errorPayload?.message || `中継APIでエラーが発生しました（HTTP ${response.status}）。`);
+    error.status = response.status;
+    error.code = errorPayload?.code || 'API_PROXY_ERROR';
+    error.details = errorPayload?.details || null;
+    throw error;
+  }
   return unwrapApiPayload(payload);
+}
+
+function formatApiErrorForDisplay(error) {
+  const message = error?.message || '実データを取得できませんでした。';
+  const directReason = error?.details?.reason;
+  const attemptReasons = Array.isArray(error?.details?.attempts)
+    ? [...new Set(error.details.attempts.map(item => item?.reason).filter(Boolean))].slice(0, 2).join(' / ')
+    : '';
+  const reason = directReason || attemptReasons;
+  return reason && !message.includes(reason) ? `${message}（${reason}）` : message;
 }
 
 function findStockSource(symbol) {
@@ -127,6 +150,9 @@ async function fetchRealMarketData(symbol) {
     currency: payload?.currency || source.currency,
     dataSource: 'api',
     provider: payload?.provider || 'API',
+    marketState: payload?.marketState || 'live',
+    statusMessage: payload?.statusMessage || '',
+    apiSymbol: payload?.apiSymbol || symbol,
     fetchedAt: payload?.fetchedAt || new Date().toISOString()
   };
 }
@@ -152,6 +178,11 @@ async function fetchRealChartData(symbol, range = DEFAULT_CHART_RANGE) {
     range,
     source: 'api',
     provider: payload?.provider || 'API',
+    marketState: payload?.marketState || 'live',
+    statusMessage: payload?.statusMessage || '',
+    latestAt: payload?.latestAt || null,
+    interval: payload?.interval || config.interval,
+    apiSymbol: payload?.apiSymbol || symbol,
     points,
     fetchedAt: payload?.fetchedAt || new Date().toISOString(),
     fallbackReason: null
@@ -267,7 +298,7 @@ async function fetchMarketData(symbol) {
     console.warn(`Market API fallback for ${symbol}:`, error);
     const fallback = await dataProviders.demo.fetchMarketData(symbol);
     fallback.dataSource = 'demo-fallback';
-    fallback.fallbackReason = error.message || 'Market API error';
+    fallback.fallbackReason = formatApiErrorForDisplay(error);
     return fallback;
   }
 }
@@ -281,7 +312,7 @@ async function fetchChartData(symbol, range = DEFAULT_CHART_RANGE) {
     console.warn(`Chart API fallback for ${symbol} (${range}):`, error);
     const fallback = await dataProviders.demo.fetchChartData(symbol, range);
     fallback.source = 'demo-fallback';
-    fallback.fallbackReason = error.message || 'Chart API error';
+    fallback.fallbackReason = formatApiErrorForDisplay(error);
     return fallback;
   }
 }
@@ -734,11 +765,28 @@ function removeTag(stockId, tag, scope) {
   stock.tags = stock.tags.filter(item => item !== tag); saveStocks(); renderTagElements(scope, stock); updateJournalSummary(scope, stock); scope.querySelector('.journal-message').textContent = `#${tag} を削除しました。`;
 }
 
+function formatDataTimestamp(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '' : new Intl.DateTimeFormat('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date);
+}
+
 function updatePriceElements(scope, stock) {
   scope.querySelector('.currency').textContent = `(${stock.currency})`;
   const source = scope.querySelector('.price-source');
-  source.textContent = stock.dataSource === 'api' ? String(stock.provider || 'API').toUpperCase() : stock.dataSource === 'demo-fallback' ? 'SAMPLE FALLBACK' : 'SAMPLE';
+  const closeBased = stock.dataSource === 'api' && stock.marketState === 'close';
+  source.textContent = stock.dataSource === 'api' ? `${String(stock.provider || 'API').toUpperCase()}${closeBased ? ' CLOSE' : ''}` : stock.dataSource === 'demo-fallback' ? 'SAMPLE FALLBACK' : 'SAMPLE';
   source.classList.toggle('api', stock.dataSource === 'api');
+  source.classList.toggle('close', closeBased);
+  const marketStatus = scope.querySelector('.market-data-status');
+  const fetchedLabel = formatDataTimestamp(stock.fetchedAt);
+  marketStatus.textContent = stock.dataSource === 'demo-fallback'
+    ? `実価格を取得できないためサンプルを表示しています。理由：${stock.fallbackReason || '取得エラー'}`
+    : closeBased
+      ? `${stock.statusMessage || '市場終了後の終値ベースの価格です。'}${fetchedLabel ? ` 最終取得：${fetchedLabel}` : ''}`
+      : '';
+  marketStatus.hidden = !marketStatus.textContent;
+  marketStatus.classList.toggle('fallback', stock.dataSource === 'demo-fallback');
+  marketStatus.classList.toggle('close', closeBased);
   scope.querySelector('.current-price').textContent = formatPrice(stock);
   const change = scope.querySelector('.change-pill');
   change.classList.remove('up', 'down');
@@ -875,12 +923,29 @@ async function changeChartRange(stockId, range) {
 function renderChart(symbol, chartData, card) {
   const stock = stocks.find(item => item.symbol === symbol);
   const points = chartData?.points;
-  if (!stock || !card || !Array.isArray(points) || points.length < 2) return;
+  if (!stock || !card) return;
+  const chartStatus = card.querySelector('.chart-status');
+  if (!Array.isArray(points) || points.length < 2) {
+    chartStatus.textContent = '実データが2点未満のため、チャートを描画できません。代替データを確認しています。';
+    chartStatus.hidden = false;
+    chartStatus.classList.add('fallback');
+    return;
+  }
   const selectedRange = chartData.range || chartRanges.get(stock.id) || DEFAULT_CHART_RANGE;
   const rangeLabel = CHART_RANGE_CONFIG[selectedRange]?.label || CHART_RANGE_CONFIG[DEFAULT_CHART_RANGE].label;
   const sourceLabel = card.querySelector('.chart-data-source');
-  sourceLabel.textContent = chartData.source === 'api' ? String(chartData.provider || 'API').toUpperCase() : chartData.source === 'demo-fallback' ? 'SAMPLE FALLBACK' : 'SAMPLE';
+  const closeBased = chartData.source === 'api' && chartData.marketState === 'close';
+  sourceLabel.textContent = chartData.source === 'api' ? `${String(chartData.provider || 'API').toUpperCase()}${closeBased ? ' CLOSE' : ''}` : chartData.source === 'demo-fallback' ? 'SAMPLE FALLBACK' : 'SAMPLE';
   sourceLabel.classList.toggle('fallback', chartData.source === 'demo-fallback');
+  sourceLabel.classList.toggle('close', closeBased);
+  chartStatus.textContent = chartData.source === 'demo-fallback'
+    ? `実データを取得できないためサンプルを表示しています。理由：${chartData.fallbackReason || '取得エラー'}`
+    : chartData.statusMessage
+      ? `${chartData.statusMessage}${chartData.latestAt ? ` 直近データ：${chartData.latestAt}` : ''}`
+      : '';
+  chartStatus.hidden = !chartStatus.textContent;
+  chartStatus.classList.toggle('fallback', chartData.source === 'demo-fallback');
+  chartStatus.classList.toggle('close', closeBased);
   card.querySelectorAll('.chart-range-button').forEach(button => {
     const active = button.dataset.range === selectedRange;
     button.classList.toggle('active', active);

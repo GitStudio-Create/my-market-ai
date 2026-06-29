@@ -126,6 +126,10 @@ input:focus, select:focus, textarea:focus { border-color: var(--green); box-shad
 .mini-label { margin: 0 0 4px; color: var(--muted); font-size: 9px; }
 .price-source { display: inline-flex; margin-left: 4px; padding: 2px 5px; border-radius: 4px; background: var(--soft); color: var(--muted); font-size: 7px; font-weight: 900; letter-spacing: .04em; vertical-align: 1px; }
 .price-source.api { background: var(--green-soft); color: var(--green); }
+.price-source.close { background: var(--notice-bg); color: var(--notice-ink); }
+.market-data-status, .chart-status { margin: -12px 0 16px; color: var(--muted); font-size: 9px; font-weight: 700; line-height: 1.5; overflow-wrap: anywhere; }
+.market-data-status.fallback, .chart-status.fallback { color: var(--orange); }
+.market-data-status.close, .chart-status.close { color: var(--notice-ink); }
 .current-price { margin: 0; color: var(--ink); font-family: Georgia, serif; font-size: clamp(29px,3vw,35px); letter-spacing: -.02em; }
 .change-area { text-align: right; }
 .change-pill { display: inline-block; padding: 6px 9px; border-radius: 99px; font-size: 11px; font-weight: 800; }
@@ -138,6 +142,8 @@ input:focus, select:focus, textarea:focus { border-color: var(--green); box-shad
 .chart-heading strong { font-size: 11px; }
 .chart-data-source { padding: 3px 5px; border-radius: 4px; background: var(--green-soft); color: var(--green); font-size: 7px; font-weight: 900; letter-spacing: .08em; }
 .chart-data-source.fallback { background: var(--orange-soft); color: var(--orange); }
+.chart-data-source.close { background: var(--notice-bg); color: var(--notice-ink); }
+.chart-status { margin: -2px 0 8px; }
 .chart-ranges { padding: 2px; border: 1px solid var(--line); border-radius: 7px; background: var(--soft); gap: 2px !important; }
 .chart-range-button { min-width: 34px; min-height: 27px; padding: 0 6px; border: 0; border-radius: 5px; background: transparent; color: var(--muted); font-size: 8px; font-weight: 800; white-space: nowrap; }
 .chart-range-button:hover { color: var(--green); }
