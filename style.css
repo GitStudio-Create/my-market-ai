@@ -172,6 +172,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--green); box-shad
 .news-link { position: relative; display: block; padding-right: 24px; color: var(--ink); text-decoration: none; font-size: 11px; font-weight: 800; line-height: 1.55; overflow-wrap: anywhere; word-break: break-word; }
 .news-link::after { content: "↗"; position: absolute; top: 0; right: 1px; color: var(--green); font-size: 12px; font-weight: 900; }
 .news-link:hover { color: var(--green); text-decoration: underline; text-underline-offset: 3px; }
+.news-description { margin: 6px 0 0; color: var(--muted); font-size: 9px; line-height: 1.55; overflow-wrap: anywhere; }
 .news-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 7px; color: var(--muted); font-size: 8px; }
 .news-meta .source { font-weight: 800; }
 .news-category { padding: 3px 6px; border-radius: 99px; background: var(--green-soft); color: var(--green); font-weight: 900; }

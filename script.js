@@ -7,7 +7,7 @@ const API_PROXY_BASE_URL = 'https://my-market-ai-proxy.kenji-nakagawa001.workers
 const DATA_MODE = 'api';
 const DATA_ERROR_MESSAGE = 'データ取得に失敗しました。時間をおいて再度お試しください。';
 const PRICE_ERROR_MESSAGE = '価格取得に失敗しました。時間をおいて再度お試しください。';
-const NEWS_ERROR_MESSAGE = 'ニュース取得に失敗しました。時間をおいて再度お試しください。';
+const NEWS_ERROR_MESSAGE = 'ニュースを取得できませんでした。API制限または対象銘柄のニュースが存在しない可能性があります。';
 const STORAGE_KEY = 'stock-alert-memo-v1';
 const THEME_KEY = 'stock-alert-theme';
 const UPDATE_INTERVAL = 2000;
@@ -211,6 +211,7 @@ async function fetchRealNewsData(symbol) {
     time: item?.time || formatNewsTime(item?.publishedAt || item?.datetime || item?.date),
     category: item?.category || '関連情報',
     url: item?.url || item?.link || '',
+    description: String(item?.description || item?.summary || '').trim(),
     dataSource: item?.dataSource || (item?.isSample ? 'demo' : 'api'),
     isSample: Boolean(item?.isSample)
   })).filter(item => item.title && isHttpUrl(item.url));
@@ -320,14 +321,9 @@ async function fetchChartData(symbol, range = DEFAULT_CHART_RANGE) {
 async function fetchNewsData(symbol) {
   const providerMode = getEffectiveDataMode() === 'api' && API_FEATURES.news ? 'api' : 'demo';
   if (providerMode === 'demo') return dataProviders.demo.fetchNewsData(symbol);
-  try {
-    const items = await dataProviders.api.fetchNewsData(symbol);
-    if (!items.length) throw new Error('News API returned no articles.');
-    return items;
-  } catch (error) {
-    console.warn(`News API fallback for ${symbol}:`, error);
-    return dataProviders.demo.fetchNewsData(symbol).map(item => ({ ...item, dataSource: 'demo-fallback', fallbackReason: error.message || 'News API error' }));
-  }
+  const items = await dataProviders.api.fetchNewsData(symbol);
+  if (!items.length) throw new Error(NEWS_ERROR_MESSAGE);
+  return items;
 }
 
 const SUMMARY_TOPIC_RULES = [
@@ -818,10 +814,20 @@ function renderNews(symbol, newsData, scope, newsError = null) {
   if (!stock) return;
   const items = Array.isArray(newsData) ? newsData : [];
   const list = scope.querySelector('.news-list');
+  const modeLabel = scope.querySelector('.news-mode-label');
+  modeLabel.textContent = newsError ? '取得エラー' : items.some(item => !isSampleNewsItem(item)) ? '実ニュース' : 'サンプル';
   items.forEach(item => {
     const li = document.createElement('li');
     const link = document.createElement('a');
     link.className = 'news-link'; link.href = item.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.textContent = item.title;
+    if (item.description) {
+      const description = document.createElement('p');
+      description.className = 'news-description';
+      description.textContent = item.description;
+      li.append(link, description);
+    } else {
+      li.append(link);
+    }
     const meta = document.createElement('div'); meta.className = 'news-meta';
     const category = document.createElement('span'); category.className = 'news-category'; category.textContent = item.category || '関連情報';
     const source = document.createElement('span'); source.className = 'source'; source.textContent = item.source;
@@ -830,7 +836,7 @@ function renderNews(symbol, newsData, scope, newsError = null) {
     const sample = isSampleNewsItem(item);
     origin.className = `news-origin ${sample ? 'sample' : 'real'}`;
     origin.textContent = sample ? 'サンプル' : '実ニュース';
-    meta.append(category, origin, source, time); li.append(link, meta); list.append(li);
+    meta.append(category, origin, source, time); li.append(meta); list.append(li);
   });
   const errorBox = scope.querySelector('.news-error');
   errorBox.textContent = newsError || NEWS_ERROR_MESSAGE; errorBox.hidden = !newsError;

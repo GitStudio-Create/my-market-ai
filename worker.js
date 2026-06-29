@@ -1,4 +1,7 @@
 const TWELVE_DATA_BASE_URL = 'https://api.twelvedata.com';
+const FINNHUB_BASE_URL = 'https://finnhub.io/api/v1';
+const NEWS_LOOKBACK_DAYS = 30;
+const NEWS_ITEM_LIMIT = 10;
 const DEFAULT_ALLOWED_ORIGINS = [
   'https://gitstudio-create.github.io',
   'http://localhost:8000',
@@ -90,6 +93,12 @@ function symbolParams(symbolInfo) {
 function requireApiKey(env) {
   const apiKey = String(env.TWELVE_DATA_API_KEY || '').trim();
   if (!apiKey) throw new ApiError('市場データAPIが設定されていません。', 503, 'API_KEY_NOT_CONFIGURED');
+  return apiKey;
+}
+
+function requireFinnhubApiKey(env) {
+  const apiKey = String(env.FINNHUB_API_KEY || '').trim();
+  if (!apiKey) throw new ApiError('ニュースAPIが設定されていません。', 503, 'NEWS_API_KEY_NOT_CONFIGURED');
   return apiKey;
 }
 
@@ -257,29 +266,83 @@ async function chartData(url, env) {
   };
 }
 
-function sampleNews(url) {
-  const symbol = symbolFromUrl(url).requestedSymbol;
+function dateDaysAgo(days) {
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+function isHttpUrl(value) {
+  try { return ['http:', 'https:'].includes(new URL(value).protocol); } catch { return false; }
+}
+
+function sanitizeNewsText(value, maxLength) {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, maxLength);
+}
+
+async function fetchFinnhubNews(symbol, env) {
+  const url = new URL('company-news', `${FINNHUB_BASE_URL}/`);
+  url.searchParams.set('symbol', symbol);
+  url.searchParams.set('from', dateDaysAgo(NEWS_LOOKBACK_DAYS));
+  url.searchParams.set('to', new Date().toISOString().slice(0, 10));
+  url.searchParams.set('token', requireFinnhubApiKey(env));
+
+  let response;
+  try {
+    response = await fetch(url.toString(), { headers: { Accept: 'application/json' } });
+  } catch {
+    throw new ApiError('ニュース提供元へ接続できませんでした。', 502, 'NEWS_UPSTREAM_CONNECTION_ERROR');
+  }
+
+  let payload;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new ApiError('ニュース提供元から不正な応答がありました。', 502, 'NEWS_UPSTREAM_INVALID_RESPONSE');
+  }
+
+  if (!response.ok || payload?.error || !Array.isArray(payload)) {
+    const rateLimited = response.status === 429 || /limit/i.test(String(payload?.error || ''));
+    const reason = sanitizeNewsText(payload?.error || '', 240) || null;
+    throw new ApiError(
+      rateLimited ? 'ニュースAPIの利用上限に達しました。時間をおいて再度お試しください。' : 'ニュースを取得できませんでした。',
+      rateLimited ? 429 : 502,
+      rateLimited ? 'NEWS_RATE_LIMIT' : 'NEWS_UPSTREAM_ERROR',
+      { provider: 'Finnhub', reason }
+    );
+  }
+  return payload;
+}
+
+async function newsData(url, env) {
+  const symbolInfo = symbolFromUrl(url);
+  const requestedSymbol = symbolInfo.requestedSymbol;
+  const payload = await fetchFinnhubNews(requestedSymbol, env);
+  const seenUrls = new Set();
+  const items = payload
+    .filter(item => item?.headline && isHttpUrl(item?.url))
+    .sort((left, right) => Number(right.datetime || 0) - Number(left.datetime || 0))
+    .filter(item => {
+      if (seenUrls.has(item.url)) return false;
+      seenUrls.add(item.url);
+      return true;
+    })
+    .slice(0, NEWS_ITEM_LIMIT)
+    .map(item => ({
+      title: sanitizeNewsText(item.headline, 300),
+      source: sanitizeNewsText(item.source, 100) || '配信元不明',
+      category: '企業ニュース',
+      publishedAt: Number.isFinite(Number(item.datetime)) ? new Date(Number(item.datetime) * 1000).toISOString() : null,
+      url: item.url,
+      description: sanitizeNewsText(item.summary, 600),
+      isSample: false,
+      dataSource: 'api'
+    }));
+
   return {
     data: {
-      items: [
-        {
-          title: `${symbol}に関するニュースAPIは現在準備中です`,
-          source: 'My Market AI Sample',
-          category: '参考情報',
-          time: 'サンプル',
-          url: 'https://example.com/my-market-ai/news-sample',
-          isSample: true
-        },
-        {
-          title: '実ニュース接続後は配信元が提供する記事URLを表示します',
-          source: 'My Market AI Sample',
-          category: 'お知らせ',
-          time: 'サンプル',
-          url: 'https://example.com/my-market-ai/news-provider-sample',
-          isSample: true
-        }
-      ],
-      provider: 'Sample',
+      symbol: requestedSymbol,
+      items,
+      provider: 'Finnhub',
+      statusMessage: items.length ? '' : '対象銘柄のニュースが見つかりませんでした。',
       fetchedAt: new Date().toISOString()
     }
   };
@@ -299,7 +362,7 @@ export default {
       }
       if (url.pathname === '/market') return jsonResponse(await marketData(url, env), 200, cors, 'public, max-age=30');
       if (url.pathname === '/chart') return jsonResponse(await chartData(url, env), 200, cors, 'public, max-age=300');
-      if (url.pathname === '/news') return jsonResponse(sampleNews(url), 200, cors, 'public, max-age=300');
+      if (url.pathname === '/news') return jsonResponse(await newsData(url, env), 200, cors, 'public, max-age=600');
       throw new ApiError('指定されたエンドポイントはありません。', 404, 'NOT_FOUND');
     } catch (error) {
       const apiError = error instanceof ApiError ? error : new ApiError('中継APIで予期しないエラーが発生しました。');
