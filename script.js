@@ -105,7 +105,7 @@ async function requestApiProxy(endpoint, params = {}) {
   const response = await fetch(url.toString(), { headers: { Accept: 'application/json' }, credentials: 'omit' });
   if (!response.ok) throw new Error(`API proxy HTTP ${response.status}`);
   const payload = await response.json();
-  if (payload?.error || payload?.status === 'error') throw new Error(payload.message || payload.error || 'API proxy error');
+  if (payload?.error || payload?.status === 'error') throw new Error(payload.message || payload.error?.message || String(payload.error || 'API proxy error'));
   return unwrapApiPayload(payload);
 }
 
@@ -180,8 +180,8 @@ async function fetchRealNewsData(symbol) {
     time: item?.time || formatNewsTime(item?.publishedAt || item?.datetime || item?.date),
     category: item?.category || '関連情報',
     url: item?.url || item?.link || '',
-    dataSource: 'api',
-    isSample: false
+    dataSource: item?.dataSource || (item?.isSample ? 'demo' : 'api'),
+    isSample: Boolean(item?.isSample)
   })).filter(item => item.title && isHttpUrl(item.url));
 }
 

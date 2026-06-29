@@ -11,3 +11,8 @@ Desktop.ini
 *.temp
 *~
 
+# Cloudflare Workers local secrets
+.dev.vars
+.dev.vars.*
+.env
+.env.*
