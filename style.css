@@ -169,6 +169,9 @@ input:focus, select:focus, textarea:focus { border-color: var(--green); box-shad
 .news-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 7px; color: var(--muted); font-size: 8px; }
 .news-meta .source { font-weight: 800; }
 .news-category { padding: 3px 6px; border-radius: 99px; background: var(--green-soft); color: var(--green); font-weight: 900; }
+.news-origin { padding: 3px 6px; border-radius: 99px; font-weight: 900; letter-spacing: .03em; }
+.news-origin.sample { background: var(--orange-soft); color: var(--orange); }
+.news-origin.real { background: var(--green-soft); color: var(--green); }
 .news-error { margin-top: 9px; padding: 10px 11px; border: 1px solid color-mix(in srgb, var(--red) 45%, var(--line)); border-radius: 8px; background: var(--red-soft); color: var(--red); font-size: 10px; font-weight: 700; line-height: 1.5; }
 .fact-summary { display: flex; gap: 9px; margin-top: 13px; padding: 11px; background: var(--soft); border-radius: 8px; }
 .fact-summary > span { flex: 0 0 auto; width: 27px; height: 27px; display: grid; place-items: center; border-radius: 7px; background: var(--green); color: #fff; font-size: 9px; font-weight: 900; }

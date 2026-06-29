@@ -1,8 +1,9 @@
 'use strict';
 
-// Twelve Dataの設定欄。公開時はAPIキーをフロントへ直書きせず、中継APIの環境変数で管理してください。
-const API_KEY = '';
-// "demo" または "api"。apiでもAPI_KEYが空なら自動的にdemoへ戻ります。
+// 公開用の中継API URLだけを設定します。秘密のAPIキーは中継側の環境変数で管理し、ここへ記載しないでください。
+// 例: https://your-project.example.workers.dev/api （末尾の / はどちらでも可）
+const API_PROXY_BASE_URL = '';
+// "demo" または "api"。apiでも中継APIが未設定なら自動的にdemoへ戻ります。
 const DATA_MODE = 'demo';
 const DATA_ERROR_MESSAGE = 'データ取得に失敗しました。時間をおいて再度お試しください。';
 const PRICE_ERROR_MESSAGE = '価格取得に失敗しました。時間をおいて再度お試しください。';
@@ -11,8 +12,8 @@ const STORAGE_KEY = 'stock-alert-memo-v1';
 const THEME_KEY = 'stock-alert-theme';
 const UPDATE_INTERVAL = 2000;
 const API_REFRESH_INTERVAL = 60000;
-const API_SUPPORTED_SYMBOLS = new Set(['AAPL', 'SPY', 'VOO', 'QQQ']);
-const API_FEATURES = { marketPrice: true, chart: true, news: false };
+const API_FEATURES = { marketPrice: true, chart: true, news: true };
+const API_ENDPOINTS = { market: 'market', chart: 'chart', news: 'news' };
 const DEFAULT_CHART_RANGE = '1m';
 const CHART_CACHE_TTL = 5 * 60 * 1000;
 const SUMMARY_MIN_NEWS_COUNT = 2;
@@ -85,30 +86,103 @@ function generateDemoChartData(symbol, range = DEFAULT_CHART_RANGE) {
   return { symbol, range, source: 'demo', points, fetchedAt: new Date().toISOString(), fallbackReason: null };
 }
 
-// Twelve Data /time_series専用。公開時はAPIキーをフロントエンドへ直書きせず、中継APIを使用してください。
-async function fetchTwelveDataChart(symbol, range = DEFAULT_CHART_RANGE) {
+function getApiProxyBaseUrl() {
+  return API_PROXY_BASE_URL.trim().replace(/\/+$/, '');
+}
+
+function unwrapApiPayload(payload) {
+  return payload && typeof payload === 'object' && 'data' in payload ? payload.data : payload;
+}
+
+async function requestApiProxy(endpoint, params = {}) {
+  const baseUrl = getApiProxyBaseUrl();
+  if (!baseUrl) throw new Error('API proxy is not configured.');
+  const normalizedBase = /^https?:\/\//i.test(baseUrl) ? baseUrl : new URL(baseUrl, window.location.origin).toString().replace(/\/+$/, '');
+  const url = new URL(`${normalizedBase}/${endpoint}`);
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') url.searchParams.set(key, String(value));
+  });
+  const response = await fetch(url.toString(), { headers: { Accept: 'application/json' }, credentials: 'omit' });
+  if (!response.ok) throw new Error(`API proxy HTTP ${response.status}`);
+  const payload = await response.json();
+  if (payload?.error || payload?.status === 'error') throw new Error(payload.message || payload.error || 'API proxy error');
+  return unwrapApiPayload(payload);
+}
+
+function findStockSource(symbol) {
+  return stocks?.find(item => item.symbol === symbol) || stockDataProvider.getBySymbol(symbol);
+}
+
+async function fetchRealMarketData(symbol) {
+  const source = findStockSource(symbol);
+  if (!source) throw new Error(`Unknown API symbol: ${symbol}`);
+  const payload = await requestApiProxy(API_ENDPOINTS.market, { symbol });
+  const price = Number(payload?.price);
+  const change = Number(payload?.change ?? payload?.percentChange ?? source.change);
+  if (!Number.isFinite(price)) throw new Error('Market API returned an invalid price.');
+  return {
+    symbol,
+    price,
+    change: Number.isFinite(change) ? change : 0,
+    currency: payload?.currency || source.currency,
+    dataSource: 'api',
+    provider: payload?.provider || 'API',
+    fetchedAt: payload?.fetchedAt || new Date().toISOString()
+  };
+}
+
+async function fetchRealChartData(symbol, range = DEFAULT_CHART_RANGE) {
   const config = CHART_RANGE_CONFIG[range];
   if (!config) throw new Error(`Unsupported chart range: ${range}`);
   const cacheKey = `${symbol}:${range}`;
   const cached = chartApiCache.get(cacheKey);
   if (cached && Date.now() - cached.cachedAt < CHART_CACHE_TTL) return cached.data;
 
-  const url = new URL('https://api.twelvedata.com/time_series');
-  url.searchParams.set('symbol', symbol);
-  url.searchParams.set('interval', config.interval);
-  url.searchParams.set('outputsize', String(config.outputsize));
-  url.searchParams.set('order', 'asc');
-  url.searchParams.set('apikey', API_KEY.trim());
-  const response = await fetch(url.toString(), { headers: { Accept: 'application/json' } });
-  if (!response.ok) throw new Error(`Twelve Data chart HTTP ${response.status}`);
-  const payload = await response.json();
-  if (payload.status === 'error') throw new Error(payload.message || 'Twelve Data chart error');
-  const points = (payload.values || []).map(item => Number(item.close)).filter(Number.isFinite);
-  if (points.length < 2) throw new Error('Twelve Data chart returned insufficient data');
-
-  const data = { symbol, range, source: 'api', points, fetchedAt: new Date().toISOString(), fallbackReason: null };
+  const payload = await requestApiProxy(API_ENDPOINTS.chart, {
+    symbol,
+    range,
+    interval: config.interval,
+    outputsize: config.outputsize
+  });
+  const rawPoints = payload?.points || payload?.values || [];
+  const points = rawPoints.map(item => Number(typeof item === 'object' ? item.close ?? item.value : item)).filter(Number.isFinite);
+  if (points.length < 2) throw new Error('Chart API returned insufficient data.');
+  const data = {
+    symbol,
+    range,
+    source: 'api',
+    provider: payload?.provider || 'API',
+    points,
+    fetchedAt: payload?.fetchedAt || new Date().toISOString(),
+    fallbackReason: null
+  };
   chartApiCache.set(cacheKey, { cachedAt: Date.now(), data });
   return data;
+}
+
+function formatNewsTime(value) {
+  if (!value) return '';
+  const date = new Date(typeof value === 'number' && value < 1e12 ? value * 1000 : value);
+  return Number.isNaN(date.getTime()) ? String(value) : new Intl.DateTimeFormat('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date);
+}
+
+function isHttpUrl(value) {
+  try { return ['http:', 'https:'].includes(new URL(value).protocol); } catch { return false; }
+}
+
+async function fetchRealNewsData(symbol) {
+  const payload = await requestApiProxy(API_ENDPOINTS.news, { symbol });
+  const rawItems = Array.isArray(payload) ? payload : payload?.items || payload?.articles || payload?.news || [];
+  return rawItems.map(item => ({
+    symbol,
+    title: String(item?.title || item?.headline || '').trim(),
+    source: typeof item?.source === 'object' ? item.source.name : item?.source || item?.provider || '配信元不明',
+    time: item?.time || formatNewsTime(item?.publishedAt || item?.datetime || item?.date),
+    category: item?.category || '関連情報',
+    url: item?.url || item?.link || '',
+    dataSource: 'api',
+    isSample: false
+  })).filter(item => item.title && isHttpUrl(item.url));
 }
 
 const demoNewsCatalog = {
@@ -143,10 +217,10 @@ function generateDemoNewsData(symbol) {
   const source = stocks?.find(item => item.symbol === symbol) || stockDataProvider.getBySymbol(symbol);
   if (!source) throw new Error(`Unknown demo news symbol: ${symbol}`);
   const catalogKey = source.type === 'ETF' ? 'US_ETF' : source.type === '指数' ? (source.region === '日本' ? 'JP_INDEX' : 'US_INDEX') : (source.region === '日本' ? 'JP_STOCK' : 'US_STOCK');
-  return demoNewsCatalog[catalogKey].map(item => ({ ...item, symbol }));
+  return demoNewsCatalog[catalogKey].map(item => ({ ...item, symbol, dataSource: 'demo', isSample: true }));
 }
 
-// データ提供元。現在はdemoのみ実装し、apiは接続先を実装するための雛形です。
+// 画面側はこの共通インターフェースだけを利用します。API提供元の違いは中継API側で吸収します。
 const dataProviders = {
   demo: {
     async fetchMarketData(symbol) {
@@ -170,44 +244,32 @@ const dataProviders = {
     }
   },
   api: {
-    async fetchMarketData(symbol) {
-      if (!API_SUPPORTED_SYMBOLS.has(symbol)) return dataProviders.demo.fetchMarketData(symbol);
-      const source = stocks?.find(item => item.symbol === symbol) || stockDataProvider.getBySymbol(symbol);
-      if (!source) throw new Error(`Unknown API symbol: ${symbol}`);
-
-      const url = new URL('https://api.twelvedata.com/price');
-      url.searchParams.set('symbol', symbol);
-      url.searchParams.set('apikey', API_KEY.trim());
-      const response = await fetch(url.toString(), { headers: { Accept: 'application/json' } });
-      if (!response.ok) throw new Error(`Twelve Data HTTP ${response.status}`);
-      const payload = await response.json();
-      const price = Number(payload.price);
-      if (payload.status === 'error' || !Number.isFinite(price)) throw new Error(payload.message || 'Invalid Twelve Data price response');
-
-      return {
-        symbol,
-        price,
-        change: source.change,
-        currency: source.currency,
-        dataSource: 'api',
-        fetchedAt: new Date().toISOString()
-      };
-    },
-    async fetchChartData(symbol, range) { return fetchTwelveDataChart(symbol, range); },
-    async fetchNewsData() { throw new Error('News API provider is not configured.'); }
+    fetchMarketData: fetchRealMarketData,
+    fetchChartData: fetchRealChartData,
+    fetchNewsData: fetchRealNewsData
   }
 };
 
 function getEffectiveDataMode() {
-  return DATA_MODE === 'api' && API_KEY.trim() ? 'api' : 'demo';
+  return DATA_MODE === 'api' && getApiProxyBaseUrl() ? 'api' : 'demo';
 }
 
-function usesApiPrice(symbol) {
-  return getEffectiveDataMode() === 'api' && API_SUPPORTED_SYMBOLS.has(symbol);
+function usesApiPrice(stock) {
+  return getEffectiveDataMode() === 'api' && stock?.dataSource === 'api';
 }
 
 async function fetchMarketData(symbol) {
-  return dataProviders[getEffectiveDataMode()].fetchMarketData(symbol);
+  const providerMode = getEffectiveDataMode() === 'api' && API_FEATURES.marketPrice ? 'api' : 'demo';
+  if (providerMode === 'demo') return dataProviders.demo.fetchMarketData(symbol);
+  try {
+    return await dataProviders.api.fetchMarketData(symbol);
+  } catch (error) {
+    console.warn(`Market API fallback for ${symbol}:`, error);
+    const fallback = await dataProviders.demo.fetchMarketData(symbol);
+    fallback.dataSource = 'demo-fallback';
+    fallback.fallbackReason = error.message || 'Market API error';
+    return fallback;
+  }
 }
 
 async function fetchChartData(symbol, range = DEFAULT_CHART_RANGE) {
@@ -226,7 +288,15 @@ async function fetchChartData(symbol, range = DEFAULT_CHART_RANGE) {
 
 async function fetchNewsData(symbol) {
   const providerMode = getEffectiveDataMode() === 'api' && API_FEATURES.news ? 'api' : 'demo';
-  return dataProviders[providerMode].fetchNewsData(symbol);
+  if (providerMode === 'demo') return dataProviders.demo.fetchNewsData(symbol);
+  try {
+    const items = await dataProviders.api.fetchNewsData(symbol);
+    if (!items.length) throw new Error('News API returned no articles.');
+    return items;
+  } catch (error) {
+    console.warn(`News API fallback for ${symbol}:`, error);
+    return dataProviders.demo.fetchNewsData(symbol).map(item => ({ ...item, dataSource: 'demo-fallback', fallbackReason: error.message || 'News API error' }));
+  }
 }
 
 const SUMMARY_TOPIC_RULES = [
@@ -667,7 +737,7 @@ function removeTag(stockId, tag, scope) {
 function updatePriceElements(scope, stock) {
   scope.querySelector('.currency').textContent = `(${stock.currency})`;
   const source = scope.querySelector('.price-source');
-  source.textContent = stock.dataSource === 'api' ? 'TWELVE DATA' : 'SAMPLE';
+  source.textContent = stock.dataSource === 'api' ? String(stock.provider || 'API').toUpperCase() : stock.dataSource === 'demo-fallback' ? 'SAMPLE FALLBACK' : 'SAMPLE';
   source.classList.toggle('api', stock.dataSource === 'api');
   scope.querySelector('.current-price').textContent = formatPrice(stock);
   const change = scope.querySelector('.change-pill');
@@ -690,6 +760,11 @@ function addCondition(container, text) {
   const tag = document.createElement('span'); tag.className = 'condition'; tag.textContent = text; container.append(tag);
 }
 
+function isSampleNewsItem(item) {
+  if (item?.isSample || item?.dataSource === 'demo' || item?.dataSource === 'demo-fallback') return true;
+  try { return new URL(item?.url).hostname.toLowerCase() === 'example.com'; } catch { return true; }
+}
+
 function renderNews(symbol, newsData, scope, newsError = null) {
   const stock = stocks.find(item => item.symbol === symbol);
   if (!stock) return;
@@ -703,7 +778,11 @@ function renderNews(symbol, newsData, scope, newsError = null) {
     const category = document.createElement('span'); category.className = 'news-category'; category.textContent = item.category || '関連情報';
     const source = document.createElement('span'); source.className = 'source'; source.textContent = item.source;
     const time = document.createElement('time'); time.textContent = item.time;
-    meta.append(category, source, time); li.append(link, meta); list.append(li);
+    const origin = document.createElement('span');
+    const sample = isSampleNewsItem(item);
+    origin.className = `news-origin ${sample ? 'sample' : 'real'}`;
+    origin.textContent = sample ? 'サンプル' : '実ニュース';
+    meta.append(category, origin, source, time); li.append(link, meta); list.append(li);
   });
   const errorBox = scope.querySelector('.news-error');
   errorBox.textContent = newsError || NEWS_ERROR_MESSAGE; errorBox.hidden = !newsError;
@@ -800,7 +879,7 @@ function renderChart(symbol, chartData, card) {
   const selectedRange = chartData.range || chartRanges.get(stock.id) || DEFAULT_CHART_RANGE;
   const rangeLabel = CHART_RANGE_CONFIG[selectedRange]?.label || CHART_RANGE_CONFIG[DEFAULT_CHART_RANGE].label;
   const sourceLabel = card.querySelector('.chart-data-source');
-  sourceLabel.textContent = chartData.source === 'api' ? 'TWELVE DATA' : chartData.source === 'demo-fallback' ? 'SAMPLE FALLBACK' : 'SAMPLE';
+  sourceLabel.textContent = chartData.source === 'api' ? String(chartData.provider || 'API').toUpperCase() : chartData.source === 'demo-fallback' ? 'SAMPLE FALLBACK' : 'SAMPLE';
   sourceLabel.classList.toggle('fallback', chartData.source === 'demo-fallback');
   card.querySelectorAll('.chart-range-button').forEach(button => {
     const active = button.dataset.range === selectedRange;
@@ -839,7 +918,7 @@ async function tickPrices() {
     if ((stock.updateMode || assetTypeSettings[stock.type]?.updateMode) === 'daily') return;
     const card = document.querySelector(`.stock-card[data-id="${stock.id}"]`);
     const state = runtimeCardData.get(stock.id) || { news: [], error: null, lastMarketAttempt: 0 };
-    const apiPrice = usesApiPrice(stock.symbol);
+    const apiPrice = usesApiPrice(stock);
     const shouldRefreshPrice = !apiPrice || Date.now() - state.lastMarketAttempt >= API_REFRESH_INTERVAL;
 
     if (shouldRefreshPrice) {
@@ -950,7 +1029,7 @@ window.addEventListener('resize', () => requestAnimationFrame(renderAllCharts));
 
 async function initializeApp() {
   const effectiveMode = getEffectiveDataMode();
-  document.querySelector('#dataModeLabel').textContent = effectiveMode === 'api' ? 'API価格・参考補助データ' : DATA_MODE === 'api' ? 'サンプル表示（APIキー未設定）' : 'サンプル表示';
+  document.querySelector('#dataModeLabel').textContent = effectiveMode === 'api' ? '実データ接続' : DATA_MODE === 'api' ? 'サンプル表示（中継API未設定）' : 'サンプル表示';
   applyTheme(localStorage.getItem(THEME_KEY) || 'light');
   await refreshAllData();
   render();
