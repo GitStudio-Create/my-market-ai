@@ -2,9 +2,9 @@
 
 // 公開用の中継API URLだけを設定します。秘密のAPIキーは中継側の環境変数で管理し、ここへ記載しないでください。
 // 例: https://your-project.example.workers.dev/api （末尾の / はどちらでも可）
-const API_PROXY_BASE_URL = '';
+const API_PROXY_BASE_URL = 'https://my-market-ai-proxy.kenji-nakagawa001.workers.dev';
 // "demo" または "api"。apiでも中継APIが未設定なら自動的にdemoへ戻ります。
-const DATA_MODE = 'demo';
+const DATA_MODE = 'api';
 const DATA_ERROR_MESSAGE = 'データ取得に失敗しました。時間をおいて再度お試しください。';
 const PRICE_ERROR_MESSAGE = '価格取得に失敗しました。時間をおいて再度お試しください。';
 const NEWS_ERROR_MESSAGE = 'ニュース取得に失敗しました。時間をおいて再度お試しください。';
